@@ -1,4 +1,4 @@
-# TGV-Style Cinema Ticketing Prototype
+# TGV-style Online Cinema Ticket Reservation System
 
 Focused prototype for the assignment:
 
