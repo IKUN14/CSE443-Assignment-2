@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "ticketing-app",
+    "slug": "ticketing-app",
+    "scheme": "ticketingapp",
+    "plugins": [
+      "expo-router",
+      "expo-asset",
+      "expo-font"
+    ],
+    "extra": {
+      "socketUrl": "http://127.0.0.1:3001"
+    }
+  }
+}

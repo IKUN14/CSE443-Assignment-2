@@ -1,0 +1,231 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { io } from "socket.io-client";
+
+const DemoContext = createContext(null);
+
+const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || "http://127.0.0.1:3001";
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || SOCKET_URL;
+const NOTIFICATION_DEDUPE_MS = 30000;
+
+function buildNotificationKey(userId, kind, title, message, meta = {}) {
+  return [
+    userId,
+    kind,
+    title,
+    message,
+    meta.route || "",
+    meta.sessionId || "",
+    meta.movieId || "",
+    meta.actionLabel || "",
+  ].join("|");
+}
+
+function normalizeNotifications(items) {
+  const merged = new Map();
+
+  items.forEach((item) => {
+    const key = buildNotificationKey("", item.kind, item.title, item.message, item);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, item);
+      return;
+    }
+
+    merged.set(key, {
+      ...existing,
+      read: existing.read && item.read,
+    });
+  });
+
+  return Array.from(merged.values()).slice(0, 50);
+}
+
+export function DemoProvider({ children }) {
+  const [username, setUsername] = useState("User A");
+  const [selectedSession, setSelectedSession] = useState(null);
+  const [sessionStatus, setSessionStatus] = useState("normal");
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsLoaded, setNotificationsLoaded] = useState(false);
+  const notificationKeysRef = useRef(new Map());
+
+  const socket = useMemo(() => io(SOCKET_URL, { transports: ["websocket"] }), []);
+
+  useEffect(() => {
+    if (socket && username) {
+      socket.emit("register_user", { userId: username });
+    }
+  }, [socket, username]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadNotifications() {
+      setNotificationsLoaded(false);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/notifications?userId=${encodeURIComponent(username)}`);
+        const data = await response.json();
+        if (!cancelled && data.ok) {
+          setNotifications(normalizeNotifications(Array.isArray(data.notifications) ? data.notifications : []));
+        }
+      } catch {
+        if (!cancelled) {
+          setNotifications([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setNotificationsLoaded(true);
+        }
+      }
+    }
+
+    if (username) {
+      loadNotifications();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [username]);
+
+  useEffect(() => {
+    return () => {
+      socket.disconnect();
+    };
+  }, [socket]);
+
+  const pushNotification = useCallback((kind, title, message, meta = {}) => {
+    const key = buildNotificationKey(username, kind, title, message, meta);
+    const now = Date.now();
+    const lastCreatedAt = notificationKeysRef.current.get(key);
+    if (lastCreatedAt && now - lastCreatedAt < NOTIFICATION_DEDUPE_MS) {
+      return null;
+    }
+    notificationKeysRef.current.set(key, now);
+
+    const optimisticId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const optimisticNotification = {
+      id: optimisticId,
+      kind,
+      title,
+      message,
+      timestamp: new Date().toISOString(),
+      read: false,
+      route: meta.route || null,
+      actionLabel: meta.actionLabel || null,
+      sessionId: meta.sessionId || null,
+      movieId: meta.movieId || null,
+      tone: meta.tone || null,
+    };
+
+    setNotifications((prev) => normalizeNotifications([optimisticNotification, ...prev]));
+
+    fetch(`${API_BASE_URL}/api/notifications`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: username,
+        kind,
+        title,
+        message,
+        route: meta.route || null,
+        actionLabel: meta.actionLabel || null,
+        sessionId: meta.sessionId || null,
+        movieId: meta.movieId || null,
+        read: false,
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.ok || !data.notification) return;
+        setNotifications((prev) => normalizeNotifications([data.notification, ...prev.filter((item) => item.id !== optimisticId)]));
+      })
+      .catch(() => {
+        // Keep optimistic entry if persistence fails.
+      });
+
+    return optimisticId;
+  }, [username]);
+
+  const markAllNotificationsRead = useCallback(() => {
+    setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
+    fetch(`${API_BASE_URL}/api/notifications/read`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: username }),
+    }).catch(() => {});
+  }, [username]);
+
+  const markNotificationRead = useCallback((notificationId) => {
+    setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
+    fetch(`${API_BASE_URL}/api/notifications/read`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: username, notificationId }),
+    }).catch(() => {});
+  }, [username]);
+
+  const clearNotifications = useCallback(() => {
+    setNotifications([]);
+    fetch(`${API_BASE_URL}/api/notifications`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: username }),
+    }).catch(() => {});
+  }, [username]);
+
+  const removeNotification = useCallback((notificationId) => {
+    setNotifications((prev) => prev.filter((item) => item.id !== notificationId));
+    fetch(`${API_BASE_URL}/api/notifications/${encodeURIComponent(notificationId)}`, {
+      method: "DELETE",
+    }).catch(() => {});
+  }, []);
+
+  const unreadCount = useMemo(
+    () => notifications.reduce((count, item) => count + (item.read ? 0 : 1), 0),
+    [notifications]
+  );
+
+  const value = useMemo(
+    () => ({
+      socket,
+      username,
+      setUsername,
+      selectedSession,
+      setSelectedSession,
+      sessionStatus,
+      setSessionStatus,
+      notifications,
+      unreadCount,
+      notificationsLoaded,
+      pushNotification,
+      markAllNotificationsRead,
+      markNotificationRead,
+      clearNotifications,
+      removeNotification,
+    }),
+    [
+      socket,
+      username,
+      selectedSession,
+      sessionStatus,
+      notifications,
+      unreadCount,
+      notificationsLoaded,
+      pushNotification,
+      markAllNotificationsRead,
+      markNotificationRead,
+      clearNotifications,
+      removeNotification,
+    ]
+  );
+
+  return <DemoContext.Provider value={value}>{children}</DemoContext.Provider>;
+}
+
+export function useDemo() {
+  const context = useContext(DemoContext);
+  if (!context) {
+    throw new Error("useDemo must be used within DemoProvider");
+  }
+  return context;
+}
