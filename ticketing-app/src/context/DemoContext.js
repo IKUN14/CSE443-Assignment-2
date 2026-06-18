@@ -24,6 +24,7 @@ function normalizeNotifications(items) {
   const merged = new Map();
 
   items.forEach((item) => {
+    // Collapse repeated events from socket replays / optimistic updates into one visible card.
     const key = buildNotificationKey("", item.kind, item.title, item.message, item);
     const existing = merged.get(key);
     if (!existing) {
@@ -97,6 +98,7 @@ export function DemoProvider({ children }) {
     const key = buildNotificationKey(username, kind, title, message, meta);
     const now = Date.now();
     const lastCreatedAt = notificationKeysRef.current.get(key);
+    // Guard against the same event being emitted multiple times during a short live update burst.
     if (lastCreatedAt && now - lastCreatedAt < NOTIFICATION_DEDUPE_MS) {
       return null;
     }
@@ -137,6 +139,7 @@ export function DemoProvider({ children }) {
       .then(async (response) => {
         const data = await response.json().catch(() => null);
         if (!response.ok || !data?.ok || !data.notification) return;
+        // Replace the optimistic row with the persisted record so later read/delete actions use the server id.
         setNotifications((prev) => normalizeNotifications([data.notification, ...prev.filter((item) => item.id !== optimisticId)]));
       })
       .catch(() => {

@@ -77,6 +77,7 @@ export default function NotificationsScreen() {
     const groups = new Map();
 
     visibleNotifications.forEach((item) => {
+      // Group by movie/session so the inbox reads like booking threads instead of a flat event log.
       const key = item.movieId || item.sessionId || "general";
       if (!groups.has(key)) {
         groups.set(key, {

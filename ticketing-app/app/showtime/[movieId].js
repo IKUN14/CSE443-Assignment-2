@@ -108,6 +108,8 @@ export default function ShowtimeScreen() {
 
   const buttonLabel = sessionStatus === "sold_out" ? "Join Waitlist" : "Continue Booking";
   const wideLayout = windowWidth >= 900;
+  // Keep the hero in a two-column layout on wide screens so the poster stays readable
+  // without stretching a background image across the full desktop width.
   const posterWidth = wideLayout ? 260 : 155;
   const heroHeight = wideLayout ? 230 : 180;
 

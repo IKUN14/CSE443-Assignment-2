@@ -9,6 +9,7 @@ export const movies = [
     rating: "PG-13",
     price: 18,
     heroColor: "#312e81",
+    // Metro needs a static require here; dynamic image paths will break bundling on web/native.
     poster: require("../../assets/movies/inception.png"),
   },
   {
