@@ -673,6 +673,14 @@ function holdSeat(userId, sessionId, seat) {
     return { ok: false, message: "Seat is required." };
   }
 
+  if (session.sessionStatus === "sold_out" && !session.claimedUsers.includes(userId)) {
+    return { ok: false, message: "This released ticket is reserved for the notified waitlist user." };
+  }
+
+  if (session.availableSeats <= 0) {
+    return { ok: false, message: "This session is sold out." };
+  }
+
   if (session.bookedSeats.includes(requestedSeat)) {
     return { ok: false, message: "This seat has already been booked." };
   }
@@ -1129,6 +1137,10 @@ function updateWaitlistPositions(sessionId) {
 // Notifies the next waiting user that a ticket is available and starts the claim countdown.
 function notifyNextWaitlistUser(sessionId) {
   const session = getSession(sessionId);
+  if (session.currentlyNotifiedUser && session.claimDeadline) {
+    return { ok: false, message: "A released ticket is already waiting for a waitlist user to claim." };
+  }
+
   const nextUser = session.waitlist.find((entry) => entry.status === "waiting");
 
   if (!nextUser) {
@@ -1174,6 +1186,10 @@ function notifyNextWaitlistUser(sessionId) {
 // Simulates one returned ticket, either by increasing inventory or notifying the waitlist.
 function releaseTicket(sessionId) {
   const session = getSession(sessionId);
+
+  if (session.currentlyNotifiedUser && session.claimDeadline) {
+    return { ok: false, message: "A released ticket is already waiting for a waitlist user to claim." };
+  }
 
   if (session.waitlist.length === 0) {
     setAvailableSeats(session, session.availableSeats + 1);
@@ -1273,6 +1289,10 @@ async function refundTicket(userId, sessionId, seat = null) {
 
   if (!userId) {
     return { ok: false, message: "userId is required." };
+  }
+
+  if (session.waitlist.length > 0 && session.currentlyNotifiedUser && session.claimDeadline) {
+    return { ok: false, message: "A released ticket is already waiting for a waitlist user to claim." };
   }
 
   const ticket = await supabaseRefundActiveTicket(userId, sessionId);
