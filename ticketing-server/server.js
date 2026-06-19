@@ -127,7 +127,7 @@ app.patch("/api/notifications/read", async (req, res) => {
     }
 
     if (payload.notificationId) {
-      await supabaseUpdateNotificationsById([payload.notificationId], { read: true });
+      await supabaseUpdateNotificationsById(userId, [payload.notificationId], { read: true });
     } else {
       await supabaseUpdateNotificationsByUser(userId, { read: true });
     }
@@ -156,11 +156,15 @@ app.delete("/api/notifications", async (req, res) => {
 app.delete("/api/notifications/:id", async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
+    const userId = String(req.query.userId || req.body?.userId || "").trim();
     if (!id) {
       return res.status(400).json({ ok: false, message: "Notification id is required." });
     }
+    if (!userId) {
+      return res.status(400).json({ ok: false, message: "userId is required." });
+    }
 
-    await supabaseDeleteNotificationsById([id]);
+    await supabaseDeleteNotificationsById(userId, [id]);
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Unable to delete notification." });
@@ -375,15 +379,18 @@ async function supabaseUpdateNotificationsByUser(userId, changes) {
   });
 }
 
-async function supabaseUpdateNotificationsById(ids, changes) {
+async function supabaseUpdateNotificationsById(userId, ids, changes) {
   if (!ids.length) return;
-  await supabaseRequest(`/notifications?id=eq.${encodeURIComponent(String(ids[0]))}`, {
-    method: "PATCH",
-    headers: {
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(changes),
-  });
+  await supabaseRequest(
+    `/notifications?id=eq.${encodeURIComponent(String(ids[0]))}&user_id=eq.${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(changes),
+    }
+  );
 }
 
 async function supabaseDeleteNotificationsByUser(userId) {
@@ -395,20 +402,24 @@ async function supabaseDeleteNotificationsByUser(userId) {
   });
 }
 
-async function supabaseDeleteNotificationsById(ids) {
+async function supabaseDeleteNotificationsById(userId, ids) {
   if (!ids.length) return;
-  await supabaseRequest(`/notifications?id=eq.${encodeURIComponent(String(ids[0]))}`, {
-    method: "DELETE",
-    headers: {
-      Prefer: "return=minimal",
-    },
-  });
+  await supabaseRequest(
+    `/notifications?id=eq.${encodeURIComponent(String(ids[0]))}&user_id=eq.${encodeURIComponent(userId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Prefer: "return=minimal",
+      },
+    }
+  );
 }
 
 function mapNotificationRow(row) {
   if (!row) return null;
   return {
     id: String(row.id),
+    userId: row.user_id,
     kind: row.kind,
     title: row.title,
     message: row.message,
@@ -1363,6 +1374,9 @@ function resetDemo(sessionId) {
 io.on("connection", (socket) => {
   socket.on("register_user", ({ userId }) => {
     if (!userId) return;
+    if (socket.data.userId && socket.data.userId !== userId) {
+      socket.leave(`user:${socket.data.userId}`);
+    }
     socket.join(`user:${userId}`);
     socket.data.userId = userId;
     void supabaseUpsertUser(userId).catch((error) => console.error("Failed to persist user:", error.message));

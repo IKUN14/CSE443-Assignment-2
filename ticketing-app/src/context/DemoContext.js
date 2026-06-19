@@ -25,7 +25,7 @@ function normalizeNotifications(items) {
 
   items.forEach((item) => {
     // Collapse repeated events from socket replays / optimistic updates into one visible card.
-    const key = buildNotificationKey("", item.kind, item.title, item.message, item);
+    const key = buildNotificationKey(item.userId || "", item.kind, item.title, item.message, item);
     const existing = merged.get(key);
     if (!existing) {
       merged.set(key, item);
@@ -61,6 +61,7 @@ export function DemoProvider({ children }) {
     let cancelled = false;
 
     async function loadNotifications() {
+      setNotifications([]);
       setNotificationsLoaded(false);
       try {
         const response = await fetch(`${API_BASE_URL}/api/notifications?userId=${encodeURIComponent(username)}`);
@@ -112,6 +113,7 @@ export function DemoProvider({ children }) {
       message,
       timestamp: new Date().toISOString(),
       read: false,
+      userId: username,
       route: meta.route || null,
       actionLabel: meta.actionLabel || null,
       sessionId: meta.sessionId || null,
@@ -178,10 +180,10 @@ export function DemoProvider({ children }) {
 
   const removeNotification = useCallback((notificationId) => {
     setNotifications((prev) => prev.filter((item) => item.id !== notificationId));
-    fetch(`${API_BASE_URL}/api/notifications/${encodeURIComponent(notificationId)}`, {
+    fetch(`${API_BASE_URL}/api/notifications/${encodeURIComponent(notificationId)}?userId=${encodeURIComponent(username)}`, {
       method: "DELETE",
     }).catch(() => {});
-  }, []);
+  }, [username]);
 
   const unreadCount = useMemo(
     () => notifications.reduce((count, item) => count + (item.read ? 0 : 1), 0),
