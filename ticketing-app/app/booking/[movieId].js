@@ -10,7 +10,7 @@ const seatNumbers = ["1", "2", "3", "4", "5"];
 
 export default function BookingScreen() {
   const { movieId, fromWaitlistClaim } = useLocalSearchParams();
-  const { socket, selectedSession, sessionStatus, setSessionStatus, unreadCount } = useDemo();
+  const { socket, username, selectedSession, setSelectedSession, sessionStatus, setSessionStatus, pushNotification, unreadCount } = useDemo();
   const movie = useMemo(() => movies.find((item) => item.id === movieId), [movieId]);
   const activeSession = useMemo(
     () =>
@@ -27,6 +27,7 @@ export default function BookingScreen() {
   );
   const [selectedSeat, setSelectedSeat] = useState(null);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     if (!socket || !activeSession) return;
@@ -56,8 +57,51 @@ export default function BookingScreen() {
       Alert.alert("Select a seat", "Pick one available seat before confirming.");
       return;
     }
-    Alert.alert("Booking confirmed", `${movie.title} at ${activeSession.cinema} for seat ${selectedSeat}.`);
-    router.replace("/");
+    if (confirming) return;
+
+    const ticketPayload = {
+      ...activeSession,
+      userId: username,
+      seat: selectedSeat,
+    };
+
+    const completeBooking = (ticket = null) => {
+      setConfirming(false);
+      setSelectedSession({
+        ...ticketPayload,
+        ticketId: ticket?.id || null,
+      });
+      Alert.alert("Booking confirmed", `${movie.title} at ${activeSession.cinema} for seat ${selectedSeat}.`);
+      router.replace("/my-ticket");
+    };
+
+    if (!socket || !activeSession.sessionId) {
+      completeBooking();
+      return;
+    }
+
+    setConfirming(true);
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setConfirming(false);
+      pushNotification("error", "Booking failed", "The server did not respond. Restart the ticketing server and try again.");
+    }, 5000);
+
+    socket.emit("confirm_booking", ticketPayload, (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+
+      if (!result?.ok) {
+        setConfirming(false);
+        pushNotification("error", "Booking failed", result?.message || "Unable to save this ticket.");
+        return;
+      }
+
+      completeBooking(result.ticket || null);
+    });
   };
 
   return (
@@ -65,10 +109,10 @@ export default function BookingScreen() {
       footer={
         <FooterCTA>
           <ActionButton
-            label={selectedSeat ? `Confirm Booking · RM ${movie.price}` : "Select a seat"}
+            label={confirming ? "Saving Ticket..." : selectedSeat ? `Confirm Booking · RM ${movie.price}` : "Select a seat"}
             onPress={confirmBooking}
             style={{ width: "100%", backgroundColor: selectedSeat ? "#e50914" : "#1a1a1a" }}
-            disabled={!selectedSeat}
+            disabled={!selectedSeat || confirming}
           />
         </FooterCTA>
       }

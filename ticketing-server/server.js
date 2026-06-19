@@ -382,6 +382,65 @@ function mapNotificationRow(row) {
   };
 }
 
+function mapTicketRow(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    userId: row.user_id,
+    sessionId: row.session_id,
+    movieId: row.movie_id,
+    movieTitle: row.movie_title,
+    cinema: row.cinema,
+    showtime: row.showtime,
+    date: row.session_date,
+    seat: row.seat,
+    price: Number(row.price),
+    status: row.status,
+    refundedAt: row.refunded_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function supabaseCreateTicket(ticket) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  const response = await supabaseRequest("/tickets", {
+    method: "POST",
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(ticket),
+  });
+  const rows = await response.json();
+  return mapTicketRow(rows[0]);
+}
+
+async function supabaseRefundActiveTicket(userId, sessionId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  const response = await supabaseRequest(
+    `/tickets?user_id=eq.${encodeURIComponent(userId)}&session_id=eq.${encodeURIComponent(sessionId)}&status=eq.confirmed`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        status: "refunded",
+        refunded_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
+  const rows = await response.json();
+  return rows[0] ? mapTicketRow(rows[0]) : null;
+}
+
 async function loadSession(config) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return normalizeSession(createSession(config), config);
@@ -917,6 +976,81 @@ function releaseTicket(sessionId) {
   return notifyNextWaitlistUser(sessionId);
 }
 
+async function confirmTicketBooking(payload = {}) {
+  const userId = String(payload.userId || "").trim();
+  const sessionId = String(payload.sessionId || "").trim();
+  const movieId = String(payload.movieId || sessionId).trim();
+  const seat = String(payload.seat || "").trim();
+  const session = getSession(sessionId);
+
+  if (!userId) {
+    return { ok: false, message: "userId is required." };
+  }
+
+  if (!seat) {
+    return { ok: false, message: "Seat is required." };
+  }
+
+  const ticket = await supabaseCreateTicket({
+    user_id: userId,
+    session_id: sessionId,
+    movie_id: movieId,
+    movie_title: payload.movieTitle || session.movieTitle,
+    cinema: payload.cinema || session.cinema,
+    showtime: payload.showtime || session.showtime,
+    session_date: payload.date || session.date,
+    seat,
+    price: Number(payload.price || session.price || 0),
+    status: "confirmed",
+  });
+
+  logEvent(sessionId, `${userId} booked seat ${seat}.`);
+  return {
+    ok: true,
+    persisted: Boolean(ticket),
+    ticket,
+    message: ticket ? "Ticket saved to database." : "Ticket confirmed locally. Supabase is not configured.",
+  };
+}
+
+// Handles a user refund by releasing one seat back into inventory or to the next waitlisted user.
+async function refundTicket(userId, sessionId) {
+  const session = getSession(sessionId);
+
+  if (!userId) {
+    return { ok: false, message: "userId is required." };
+  }
+
+  const ticket = await supabaseRefundActiveTicket(userId, sessionId);
+
+  if (session.waitlist.length === 0) {
+    setAvailableSeats(session, session.availableSeats + 1);
+    setSessionStatus(session, "normal");
+    logEvent(sessionId, `${userId} refunded a ticket. One seat returned to inventory.`);
+    emitSessionUpdate(sessionId);
+    return {
+      ok: true,
+      mode: "inventory",
+      ticket,
+      persisted: Boolean(ticket),
+      availableTickets: session.availableTickets,
+      message: "Your ticket has been refunded.",
+    };
+  }
+
+  setSessionStatus(session, "sold_out");
+  logEvent(sessionId, `${userId} refunded a ticket. The ticket was offered to the waitlist.`);
+  const result = notifyNextWaitlistUser(sessionId);
+  return {
+    ...result,
+    ok: true,
+    mode: "waitlist",
+    ticket,
+    persisted: Boolean(ticket),
+    message: "Your ticket has been refunded and offered to the next waitlist user.",
+  };
+}
+
 // Lets the notified waitlist user claim the released ticket before the timer expires.
 function claimReleasedTicket(userId, sessionId) {
   const session = getSession(sessionId);
@@ -1119,6 +1253,30 @@ io.on("connection", (socket) => {
       if (!result.ok) socket.emit("error_message", result.message);
     } catch (error) {
       const message = error.message || "Unable to release ticket.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
+  socket.on("confirm_booking", async (payload = {}, ack) => {
+    try {
+      const result = await confirmTicketBooking(payload);
+      if (ack) ack(result);
+      if (!result.ok) socket.emit("error_message", result.message);
+    } catch (error) {
+      const message = error.message || "Unable to confirm booking.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
+  socket.on("refund_ticket", async ({ userId, sessionId } = {}, ack) => {
+    try {
+      const result = await refundTicket(userId, sessionId);
+      if (ack) ack(result);
+      if (!result.ok) socket.emit("error_message", result.message);
+    } catch (error) {
+      const message = error.message || "Unable to refund ticket.";
       if (ack) ack({ ok: false, message });
       socket.emit("error_message", message);
     }
