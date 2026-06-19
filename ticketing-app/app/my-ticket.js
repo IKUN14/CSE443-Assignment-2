@@ -47,6 +47,7 @@ export default function MyTicketScreen() {
       {
         userId: username,
         sessionId: selectedSession.sessionId,
+        seat: selectedSession.seat,
       },
       (result) => {
         if (settled) return;

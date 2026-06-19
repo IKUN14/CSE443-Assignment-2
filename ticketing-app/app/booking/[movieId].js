@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, Text, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { movies } from "../../src/data/movies";
@@ -7,6 +7,15 @@ import { ActionButton, BackButton, Card, FooterCTA, HeroBand, NotificationBell, 
 
 const rows = ["A", "B", "C", "D"];
 const seatNumbers = ["1", "2", "3", "4", "5"];
+const duplicateTicketMessage = "You already have a ticket for this session.";
+
+function normalizeBookingError(message) {
+  if (!message) return "Unable to save this ticket.";
+  if (message.includes("23505") || message.includes("tickets_active_user_session_idx") || message.includes("already exists")) {
+    return duplicateTicketMessage;
+  }
+  return message;
+}
 
 export default function BookingScreen() {
   const { movieId, fromWaitlistClaim } = useLocalSearchParams();
@@ -26,8 +35,15 @@ export default function BookingScreen() {
     [movie, selectedSession]
   );
   const [selectedSeat, setSelectedSeat] = useState(null);
+  const selectedSeatRef = useRef(null);
+  const [bookedSeats, setBookedSeats] = useState(["B3"]);
+  const [heldSeats, setHeldSeats] = useState({});
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    selectedSeatRef.current = selectedSeat;
+  }, [selectedSeat]);
 
   useEffect(() => {
     if (!socket || !activeSession) return;
@@ -35,14 +51,38 @@ export default function BookingScreen() {
     const onSessionUpdate = (payload) => {
       if (payload.sessionId !== activeSession.sessionId) return;
       setSessionStatus(payload.sessionStatus || payload.status || "normal");
+      if (Array.isArray(payload.bookedSeats)) setBookedSeats(payload.bookedSeats);
+      if (payload.heldSeats && typeof payload.heldSeats === "object") setHeldSeats(payload.heldSeats);
     };
 
     socket.on("session_update", onSessionUpdate);
+    socket.emit("sync_seat_state", { sessionId: activeSession.sessionId }, (result) => {
+      if (!result?.ok) return;
+      if (Array.isArray(result.bookedSeats)) setBookedSeats(result.bookedSeats);
+      if (result.heldSeats && typeof result.heldSeats === "object") setHeldSeats(result.heldSeats);
+    });
 
     return () => {
       socket.off("session_update", onSessionUpdate);
+      const heldSeat = selectedSeatRef.current;
+      if (heldSeat) {
+        socket.emit("release_seat_hold", {
+          userId: username,
+          sessionId: activeSession.sessionId,
+          seat: heldSeat,
+        });
+      }
     };
-  }, [activeSession, setSessionStatus, socket]);
+  }, [activeSession, setSessionStatus, socket, username]);
+
+  useEffect(() => {
+    if (!selectedSeat) return;
+    const heldBy = heldSeats[selectedSeat];
+    const unavailable = bookedSeats.includes(selectedSeat) || (heldBy && heldBy !== username);
+    if (unavailable) {
+      setSelectedSeat(null);
+    }
+  }, [bookedSeats, heldSeats, selectedSeat, username]);
 
   useEffect(() => {
     if (sessionStatus === "sold_out" && fromWaitlistClaim !== "1") {
@@ -51,6 +91,48 @@ export default function BookingScreen() {
   }, [fromWaitlistClaim, movieId, sessionStatus]);
 
   if (!movie || !activeSession) return null;
+
+  const selectSeat = (seatId) => {
+    if (bookedSeats.includes(seatId) || (heldSeats[seatId] && heldSeats[seatId] !== username)) {
+      Alert.alert("Seat unavailable", "This seat is already taken or currently selected by another user.");
+      return;
+    }
+
+    if (selectedSeat === seatId) {
+      setSelectedSeat(null);
+      if (socket && activeSession.sessionId) {
+        socket.emit("release_seat_hold", {
+          userId: username,
+          sessionId: activeSession.sessionId,
+          seat: seatId,
+        });
+      }
+      return;
+    }
+
+    if (!socket || !activeSession.sessionId) {
+      setSelectedSeat(seatId);
+      return;
+    }
+
+    socket.emit(
+      "hold_seat",
+      {
+        userId: username,
+        sessionId: activeSession.sessionId,
+        seat: seatId,
+      },
+      (result) => {
+        if (!result?.ok) {
+          Alert.alert("Seat unavailable", result?.message || "Unable to select this seat.");
+          return;
+        }
+        if (Array.isArray(result.bookedSeats)) setBookedSeats(result.bookedSeats);
+        if (result.heldSeats && typeof result.heldSeats === "object") setHeldSeats(result.heldSeats);
+        setSelectedSeat(seatId);
+      }
+    );
+  };
 
   const confirmBooking = () => {
     if (!selectedSeat) {
@@ -96,7 +178,18 @@ export default function BookingScreen() {
 
       if (!result?.ok) {
         setConfirming(false);
-        pushNotification("error", "Booking failed", result?.message || "Unable to save this ticket.");
+        pushNotification("error", "Booking failed", normalizeBookingError(result?.message));
+        return;
+      }
+
+      if (result.duplicate) {
+        setConfirming(false);
+        setSelectedSession({
+          ...ticketPayload,
+          ticketId: result.ticket?.id || null,
+        });
+        Alert.alert("Ticket already exists", result.message || duplicateTicketMessage);
+        router.replace("/my-ticket");
         return;
       }
 
@@ -162,27 +255,31 @@ export default function BookingScreen() {
           {rows.map((row) => (
             <View key={row} style={{ flexDirection: "row", justifyContent: "center", gap: 6, marginBottom: 8 }}>
               <Text style={{ width: 16, textAlign: "center", color: "#444", fontWeight: "700" }}>{row}</Text>
-              {seatNumbers.map((seat, index) => {
+              {seatNumbers.map((seat) => {
                 const seatId = `${row}${seat}`;
-                const booked = index === 2 && row === "B";
+                const heldBy = heldSeats[seatId];
+                const heldByOther = Boolean(heldBy && heldBy !== username);
+                const booked = bookedSeats.includes(seatId);
+                const unavailable = booked || heldByOther;
                 const selected = selectedSeat === seatId;
                 return (
                   <Pressable
                     key={seatId}
-                    onPress={() => !booked && setSelectedSeat(seatId)}
+                    onPress={() => selectSeat(seatId)}
+                    disabled={unavailable}
                     style={{
                       width: 32,
                       height: 28,
                       borderRadius: 4,
                       borderWidth: 1,
-                      borderColor: booked ? "#191919" : selected ? "#e50914" : "#3a3a3a",
-                      backgroundColor: booked ? "#0e0e0e" : selected ? "#e50914" : "#222",
+                      borderColor: unavailable ? "#191919" : selected ? "#e50914" : "#3a3a3a",
+                      backgroundColor: unavailable ? "#0e0e0e" : selected ? "#e50914" : "#222",
                       alignItems: "center",
                       justifyContent: "center",
-                      opacity: booked ? 0.6 : 1,
+                      opacity: unavailable ? 0.6 : 1,
                     }}
                   >
-                    <Text style={{ color: booked ? "#2c2c2c" : selected ? "#fff" : "#666", fontSize: 9, fontWeight: selected ? "900" : "500" }}>
+                    <Text style={{ color: unavailable ? "#2c2c2c" : selected ? "#fff" : "#666", fontSize: 9, fontWeight: selected ? "900" : "500" }}>
                       {seat}
                     </Text>
                   </Pressable>

@@ -40,6 +40,7 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || "0.0.0.0";
 const CLAIM_WINDOW_MS = 10_000;
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
@@ -95,6 +96,8 @@ app.post("/api/notifications", async (req, res) => {
     if (!userId) {
       return res.status(400).json({ ok: false, message: "userId is required." });
     }
+
+    await supabaseUpsertUser(userId);
 
     const notification = {
       user_id: userId,
@@ -229,6 +232,8 @@ function createSession(config) {
     status: "normal",
     availableSeats: 8,
     availableTickets: 8,
+    bookedSeats: ["B3"],
+    heldSeats: {},
     queue: [],
     waitlist: [],
     eventLog: [],
@@ -252,6 +257,8 @@ function sanitizeSession(session) {
     status: session.status,
     availableSeats: session.availableSeats,
     availableTickets: session.availableTickets,
+    bookedSeats: session.bookedSeats,
+    heldSeats: session.heldSeats,
     queue: session.queue,
     waitlist: session.waitlist,
     eventLog: session.eventLog,
@@ -273,6 +280,8 @@ function normalizeSession(session, config) {
   session.status = session.status || session.sessionStatus || "normal";
   session.availableSeats = Number.isFinite(session.availableSeats) ? session.availableSeats : 8;
   session.availableTickets = Number.isFinite(session.availableTickets) ? session.availableTickets : session.availableSeats;
+  session.bookedSeats = Array.isArray(session.bookedSeats) ? session.bookedSeats : ["B3"];
+  session.heldSeats = session.heldSeats && typeof session.heldSeats === "object" ? session.heldSeats : {};
   session.queue = Array.isArray(session.queue) ? session.queue : [];
   session.waitlist = Array.isArray(session.waitlist) ? session.waitlist : [];
   session.eventLog = Array.isArray(session.eventLog) ? session.eventLog : [];
@@ -305,6 +314,14 @@ async function supabaseRequest(pathname, options = {}) {
   return response;
 }
 
+function getBookingErrorMessage(error) {
+  const message = error?.message || "";
+  if (message.includes("23505") || message.includes("tickets_active_user_session_idx")) {
+    return "You already have a ticket for this session.";
+  }
+  return message || "Unable to confirm booking.";
+}
+
 async function supabaseSelect(pathname) {
   const response = await supabaseRequest(pathname, {
     method: "GET",
@@ -313,6 +330,28 @@ async function supabaseSelect(pathname) {
     },
   });
   return response.json();
+}
+
+async function supabaseUpsertUser(userId, role = "customer") {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  await supabaseRequest("/users?on_conflict=id", {
+    method: "POST",
+    headers: {
+      Prefer: "return=minimal,resolution=merge-duplicates",
+    },
+    body: JSON.stringify({
+      id: normalizedUserId,
+      display_name: normalizedUserId,
+      role,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+
+  return normalizedUserId;
 }
 
 async function supabaseUpsertNotification(notification) {
@@ -418,6 +457,30 @@ async function supabaseCreateTicket(ticket) {
   return mapTicketRow(rows[0]);
 }
 
+async function supabaseGetActiveTicket(userId, sessionId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  const response = await supabaseRequest(
+    `/tickets?user_id=eq.${encodeURIComponent(userId)}&session_id=eq.${encodeURIComponent(sessionId)}&status=eq.confirmed&limit=1`
+  );
+  const rows = await response.json();
+  return rows[0] ? mapTicketRow(rows[0]) : null;
+}
+
+async function supabaseListActiveTicketSeats(sessionId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return [];
+  }
+
+  const response = await supabaseRequest(
+    `/tickets?select=seat&session_id=eq.${encodeURIComponent(sessionId)}&status=eq.confirmed`
+  );
+  const rows = await response.json();
+  return rows.map((row) => row.seat).filter(Boolean);
+}
+
 async function supabaseRefundActiveTicket(userId, sessionId) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return null;
@@ -460,12 +523,17 @@ async function loadSession(config) {
 
   if (!stored) {
     const session = normalizeSession(createSession(config), config);
+    const ticketSeats = await supabaseListActiveTicketSeats(config.id);
+    session.bookedSeats = Array.from(new Set([...session.bookedSeats, ...ticketSeats]));
     await persistSession(session);
     return session;
   }
 
   const sessionData = typeof stored === "string" ? JSON.parse(stored) : stored;
-  return normalizeSession({ ...createSession(config), ...sessionData }, config);
+  const session = normalizeSession({ ...createSession(config), ...sessionData }, config);
+  const ticketSeats = await supabaseListActiveTicketSeats(config.id);
+  session.bookedSeats = Array.from(new Set([...session.bookedSeats, ...ticketSeats]));
+  return session;
 }
 
 async function persistSession(session) {
@@ -522,6 +590,82 @@ function setAvailableSeats(session, seats) {
   session.availableTickets = seats;
 }
 
+function buildSeatSnapshot(session) {
+  return {
+    ok: true,
+    sessionId: session.id,
+    bookedSeats: session.bookedSeats,
+    heldSeats: session.heldSeats,
+    availableSeats: session.availableSeats,
+    availableTickets: session.availableTickets,
+    sessionStatus: session.sessionStatus,
+    status: session.sessionStatus,
+  };
+}
+
+function holdSeat(userId, sessionId, seat) {
+  const session = getSession(sessionId);
+  const requestedSeat = String(seat || "").trim();
+
+  if (!userId) {
+    return { ok: false, message: "userId is required." };
+  }
+
+  if (!requestedSeat) {
+    return { ok: false, message: "Seat is required." };
+  }
+
+  if (session.bookedSeats.includes(requestedSeat)) {
+    return { ok: false, message: "This seat has already been booked." };
+  }
+
+  const heldBy = session.heldSeats[requestedSeat];
+  if (heldBy && heldBy !== userId) {
+    return { ok: false, message: "This seat is currently selected by another user." };
+  }
+
+  Object.entries(session.heldSeats).forEach(([heldSeat, heldUserId]) => {
+    if (heldUserId === userId && heldSeat !== requestedSeat) {
+      delete session.heldSeats[heldSeat];
+    }
+  });
+  session.heldSeats[requestedSeat] = userId;
+  emitSessionUpdate(sessionId);
+  return { ...buildSeatSnapshot(session), heldSeat: requestedSeat };
+}
+
+function releaseSeatHold(userId, sessionId, seat = null) {
+  const session = getSession(sessionId);
+
+  Object.entries(session.heldSeats).forEach(([heldSeat, heldUserId]) => {
+    const shouldRelease = heldUserId === userId && (!seat || heldSeat === seat);
+    if (shouldRelease) {
+      delete session.heldSeats[heldSeat];
+    }
+  });
+
+  emitSessionUpdate(sessionId);
+  return buildSeatSnapshot(session);
+}
+
+function releaseAllSeatHoldsForUser(userId) {
+  if (!userId) return;
+
+  Object.values(sessions).forEach((session) => {
+    let changed = false;
+    Object.entries(session.heldSeats).forEach(([heldSeat, heldUserId]) => {
+      if (heldUserId === userId) {
+        delete session.heldSeats[heldSeat];
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      emitSessionUpdate(session.id);
+    }
+  });
+}
+
 function createEvent(message) {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -558,6 +702,8 @@ function getUserPayload(session, userId, position) {
     sessionStatus: session.sessionStatus,
     availableTickets: session.availableSeats,
     availableSeats: session.availableSeats,
+    bookedSeats: session.bookedSeats,
+    heldSeats: session.heldSeats,
     cinema: session.cinema,
     movieTitle: session.movieTitle,
     showtime: session.showtime,
@@ -604,6 +750,8 @@ function emitSessionUpdate(sessionId) {
     sessionStatus: session.sessionStatus,
     availableTickets: session.availableSeats,
     availableSeats: session.availableSeats,
+    bookedSeats: session.bookedSeats,
+    heldSeats: session.heldSeats,
     queueLength: session.queue.length,
     waitlistLength: session.waitlist.length,
     currentlyNotifiedUser: session.currentlyNotifiedUser,
@@ -629,6 +777,8 @@ function buildAdminSnapshot() {
       sessionStatus: session.sessionStatus,
       availableTickets: session.availableSeats,
       availableSeats: session.availableSeats,
+      bookedSeats: session.bookedSeats,
+      heldSeats: session.heldSeats,
       queue: session.queue.map((entry, index) => ({
         userId: entry.userId,
         position: index + 1,
@@ -669,6 +819,8 @@ function buildQueueSnapshot(session, userId) {
       allowedToBook: false,
       sessionStatus: session.sessionStatus,
       availableSeats: session.availableSeats,
+      bookedSeats: session.bookedSeats,
+      heldSeats: session.heldSeats,
       message: session.sessionStatus === "high_demand" ? "Not currently in queue." : "Queue is not active.",
     };
   }
@@ -697,6 +849,8 @@ function buildWaitlistSnapshot(session, userId) {
       estimatedWaitMinutes: null,
       sessionStatus: session.sessionStatus,
       availableSeats: session.availableSeats,
+      bookedSeats: session.bookedSeats,
+      heldSeats: session.heldSeats,
       notice: session.sessionStatus === "sold_out" ? "Sold out" : "Not in waitlist",
     };
   }
@@ -991,6 +1145,28 @@ async function confirmTicketBooking(payload = {}) {
     return { ok: false, message: "Seat is required." };
   }
 
+  await supabaseUpsertUser(userId);
+
+  if (session.bookedSeats.includes(seat)) {
+    return { ok: false, message: "This seat has already been booked." };
+  }
+
+  const heldBy = session.heldSeats[seat];
+  if (heldBy && heldBy !== userId) {
+    return { ok: false, message: "This seat is currently selected by another user." };
+  }
+
+  const existingTicket = await supabaseGetActiveTicket(userId, sessionId);
+  if (existingTicket) {
+    return {
+      ok: true,
+      persisted: true,
+      ticket: existingTicket,
+      duplicate: true,
+      message: "You already have a ticket for this session.",
+    };
+  }
+
   const ticket = await supabaseCreateTicket({
     user_id: userId,
     session_id: sessionId,
@@ -1004,7 +1180,17 @@ async function confirmTicketBooking(payload = {}) {
     status: "confirmed",
   });
 
+  if (!session.bookedSeats.includes(seat)) {
+    session.bookedSeats.push(seat);
+  }
+  delete session.heldSeats[seat];
+  setAvailableSeats(session, Math.max(0, session.availableSeats - 1));
+  if (session.availableSeats <= 0) {
+    setSessionStatus(session, "sold_out");
+  }
+
   logEvent(sessionId, `${userId} booked seat ${seat}.`);
+  emitSessionUpdate(sessionId);
   return {
     ok: true,
     persisted: Boolean(ticket),
@@ -1014,7 +1200,7 @@ async function confirmTicketBooking(payload = {}) {
 }
 
 // Handles a user refund by releasing one seat back into inventory or to the next waitlisted user.
-async function refundTicket(userId, sessionId) {
+async function refundTicket(userId, sessionId, seat = null) {
   const session = getSession(sessionId);
 
   if (!userId) {
@@ -1022,6 +1208,11 @@ async function refundTicket(userId, sessionId) {
   }
 
   const ticket = await supabaseRefundActiveTicket(userId, sessionId);
+  const releasedSeat = ticket?.seat || seat;
+  if (releasedSeat) {
+    session.bookedSeats = session.bookedSeats.filter((bookedSeat) => bookedSeat !== releasedSeat);
+    delete session.heldSeats[releasedSeat];
+  }
 
   if (session.waitlist.length === 0) {
     setAvailableSeats(session, session.availableSeats + 1);
@@ -1159,6 +1350,8 @@ function resetDemo(sessionId) {
   session.notifiedUserId = null;
   session.claimDeadline = null;
   session.claimedUsers = [];
+  session.bookedSeats = ["B3"];
+  session.heldSeats = {};
   session.eventLog = [];
   logEvent(sessionId, "Demo reset.");
   emitSessionUpdate(sessionId);
@@ -1172,6 +1365,11 @@ io.on("connection", (socket) => {
     if (!userId) return;
     socket.join(`user:${userId}`);
     socket.data.userId = userId;
+    void supabaseUpsertUser(userId).catch((error) => console.error("Failed to persist user:", error.message));
+  });
+
+  socket.on("disconnect", () => {
+    releaseAllSeatHoldsForUser(socket.data.userId);
   });
 
   socket.on("request_booking_access", ({ userId, sessionId } = {}, ack) => {
@@ -1246,6 +1444,40 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("sync_seat_state", ({ sessionId } = {}, ack) => {
+    try {
+      const session = getSession(sessionId);
+      if (ack) ack(buildSeatSnapshot(session));
+    } catch (error) {
+      const message = error.message || "Unable to sync seat state.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
+  socket.on("hold_seat", ({ userId, sessionId, seat } = {}, ack) => {
+    try {
+      const result = holdSeat(userId, sessionId, seat);
+      if (ack) ack(result);
+      if (!result.ok) socket.emit("error_message", result.message);
+    } catch (error) {
+      const message = error.message || "Unable to hold seat.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
+  socket.on("release_seat_hold", ({ userId, sessionId, seat } = {}, ack) => {
+    try {
+      const result = releaseSeatHold(userId, sessionId, seat);
+      if (ack) ack(result);
+    } catch (error) {
+      const message = error.message || "Unable to release seat hold.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
   socket.on("release_ticket", ({ sessionId } = {}, ack) => {
     try {
       const result = releaseTicket(sessionId);
@@ -1264,15 +1496,15 @@ io.on("connection", (socket) => {
       if (ack) ack(result);
       if (!result.ok) socket.emit("error_message", result.message);
     } catch (error) {
-      const message = error.message || "Unable to confirm booking.";
+      const message = getBookingErrorMessage(error);
       if (ack) ack({ ok: false, message });
       socket.emit("error_message", message);
     }
   });
 
-  socket.on("refund_ticket", async ({ userId, sessionId } = {}, ack) => {
+  socket.on("refund_ticket", async ({ userId, sessionId, seat } = {}, ack) => {
     try {
-      const result = await refundTicket(userId, sessionId);
+      const result = await refundTicket(userId, sessionId, seat);
       if (ack) ack(result);
       if (!result.ok) socket.emit("error_message", result.message);
     } catch (error) {
@@ -1349,8 +1581,8 @@ io.on("connection", (socket) => {
 
 bootstrapSessions()
   .then(() => {
-    server.listen(PORT, "127.0.0.1", () => {
-      console.log(`Ticketing server running on http://127.0.0.1:${PORT}`);
+    server.listen(PORT, HOST, () => {
+      console.log(`Ticketing server running on http://${HOST}:${PORT}`);
     });
   })
   .catch((error) => {

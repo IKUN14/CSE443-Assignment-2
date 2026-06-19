@@ -6,6 +6,14 @@ import { useDemo } from "../../src/context/DemoContext";
 import { ActionButton, BackButton, Card, ChoiceChip, FooterCTA, HeroBand, NotificationBell, Screen, StatCard, TopBar } from "../../src/components/DemoUI";
 import { formatDisplayDate } from "../../src/utils/formatters";
 
+function normalizeBookingError(message) {
+  if (!message) return "Unable to request booking access.";
+  if (message.includes("23505") || message.includes("tickets_active_user_session_idx") || message.includes("already exists")) {
+    return "You already have a ticket for this session.";
+  }
+  return message;
+}
+
 export default function ShowtimeScreen() {
   const { movieId } = useLocalSearchParams();
   const { socket, username, selectedSession, setSelectedSession, sessionStatus, setSessionStatus, pushNotification, unreadCount } = useDemo();
@@ -81,7 +89,7 @@ export default function ShowtimeScreen() {
 
     const onError = (message) => {
       setRequestState("idle");
-      pushNotification("error", "Booking error", message);
+      pushNotification("error", "Booking error", normalizeBookingError(message));
     };
 
     socket.on("direct_booking_allowed", onDirectBookingAllowed);

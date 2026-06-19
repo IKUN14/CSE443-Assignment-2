@@ -4,6 +4,24 @@ create table if not exists public.session_states (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.users (
+  id text primary key,
+  display_name text not null,
+  role text not null default 'customer',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into public.users (id, display_name, role)
+values
+  ('User A', 'User A', 'customer'),
+  ('User B', 'User B', 'customer')
+on conflict (id) do update
+set
+  display_name = excluded.display_name,
+  role = excluded.role,
+  updated_at = now();
+
 create table if not exists public.notifications (
   id bigint generated always as identity primary key,
   user_id text not null,
@@ -54,3 +72,44 @@ create unique index if not exists tickets_active_user_session_idx
 create unique index if not exists tickets_active_session_seat_idx
   on public.tickets (session_id, session_date, showtime, seat)
   where status = 'confirmed';
+
+insert into public.users (id, display_name, role)
+select distinct user_id, user_id, 'customer'
+from public.notifications
+where user_id is not null
+on conflict (id) do nothing;
+
+insert into public.users (id, display_name, role)
+select distinct user_id, user_id, 'customer'
+from public.tickets
+where user_id is not null
+on conflict (id) do nothing;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'notifications_user_id_fkey'
+  ) then
+    alter table public.notifications
+      add constraint notifications_user_id_fkey
+      foreign key (user_id)
+      references public.users(id)
+      on update cascade
+      on delete cascade;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'tickets_user_id_fkey'
+  ) then
+    alter table public.tickets
+      add constraint tickets_user_id_fkey
+      foreign key (user_id)
+      references public.users(id)
+      on update cascade
+      on delete restrict;
+  end if;
+end $$;

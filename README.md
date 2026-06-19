@@ -14,7 +14,7 @@ Focused prototype for the assignment:
 
 ## Run locally
 
-1. Create your Supabase project, then run the SQL in `supabase/schema.sql` to create the `session_states` and `notifications` tables.
+1. Create your Supabase project, then run the SQL in `supabase/schema.sql` to create the `users`, `tickets`, `notifications`, and `session_states` tables.
 
 2. Configure environment variables:
 
@@ -35,7 +35,7 @@ npm install
 npm start
 ```
 
-The backend persists session state to `session_states` and notification history to `notifications`.
+The backend persists users to `users`, bookings to `tickets`, notification history to `notifications`, and live demo state to `session_states`.
 
 4. Open the browser user demo:
 
