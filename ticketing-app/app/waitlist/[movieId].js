@@ -163,12 +163,26 @@ export default function WaitlistScreen() {
       });
     };
 
+    const onClaimDeclined = (payload) => {
+      if (payload.sessionId !== activeSession.sessionId || payload.userId !== username) return;
+      setWaitlistState((prev) => ({
+        ...prev,
+        joined: false,
+        syncing: false,
+        ticketReleased: false,
+        countdown: null,
+        expiresAt: null,
+        notice: payload.message || "Ticket declined.",
+      }));
+    };
+
     const onError = (message) => pushNotification("error", "Waitlist error", message);
 
     socket.on("waitlist_update", onWaitlistUpdate);
     socket.on("ticket_released", onTicketReleased);
     socket.on("claim_success", onClaimSuccess);
     socket.on("claim_expired", onClaimExpired);
+    socket.on("claim_declined", onClaimDeclined);
     socket.on("error_message", onError);
 
     syncWaitlistState("Sold out");
@@ -178,6 +192,7 @@ export default function WaitlistScreen() {
       socket.off("ticket_released", onTicketReleased);
       socket.off("claim_success", onClaimSuccess);
       socket.off("claim_expired", onClaimExpired);
+      socket.off("claim_declined", onClaimDeclined);
       socket.off("error_message", onError);
     };
   }, [activeSession, completeClaimSuccess, pushNotification, socket, username]);
@@ -261,20 +276,32 @@ export default function WaitlistScreen() {
   };
 
   const declineTicket = () => {
-    setWaitlistState((prev) => ({
-      ...prev,
-      joined: true,
-      ticketReleased: false,
-      countdown: null,
-      expiresAt: null,
-      notice: "Ticket declined.",
-    }));
-    pushNotification("waitlist", "Ticket declined", "You stayed in the waitlist.", {
-      route: `/waitlist/${movie.id}`,
-      actionLabel: "Stay in waitlist",
-      sessionId: activeSession.sessionId,
-      movieId: movie.id,
-    });
+    if (!socket || !activeSession?.sessionId) return;
+    socket.emit(
+      "decline_ticket",
+      { userId: username, sessionId: activeSession.sessionId },
+      (result) => {
+        if (!result?.ok) {
+          pushNotification("error", "Decline failed", result?.message || "Unable to decline this ticket.");
+          return;
+        }
+
+        setWaitlistState((prev) => ({
+          ...prev,
+          joined: false,
+          ticketReleased: false,
+          countdown: null,
+          expiresAt: null,
+          notice: "Ticket declined.",
+        }));
+        pushNotification("waitlist", "Ticket declined", "The ticket was passed to the next waitlist user.", {
+          route: `/waitlist/${movie.id}`,
+          actionLabel: "Open waitlist",
+          sessionId: activeSession.sessionId,
+          movieId: movie.id,
+        });
+      }
+    );
   };
 
   return (

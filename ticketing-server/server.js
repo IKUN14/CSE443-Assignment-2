@@ -69,6 +69,20 @@ app.get("/api/admin/state", (_req, res) => {
   res.json(buildAdminSnapshot());
 });
 
+app.get("/api/tickets", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "").trim();
+    if (!userId) {
+      return res.status(400).json({ ok: false, message: "userId is required." });
+    }
+
+    const tickets = await supabaseListActiveTicketsByUser(userId);
+    res.json({ ok: true, tickets });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Unable to load tickets." });
+  }
+});
+
 app.get("/api/notifications", async (req, res) => {
   try {
     const userId = String(req.query.userId || "").trim();
@@ -480,6 +494,18 @@ async function supabaseGetActiveTicket(userId, sessionId) {
   return rows[0] ? mapTicketRow(rows[0]) : null;
 }
 
+async function supabaseListActiveTicketsByUser(userId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return [];
+  }
+
+  const response = await supabaseRequest(
+    `/tickets?user_id=eq.${encodeURIComponent(userId)}&status=eq.confirmed&order=created_at.desc`
+  );
+  const rows = await response.json();
+  return rows.map(mapTicketRow).filter(Boolean);
+}
+
 async function supabaseListActiveTicketSeats(sessionId) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return [];
@@ -513,6 +539,27 @@ async function supabaseRefundActiveTicket(userId, sessionId) {
   );
   const rows = await response.json();
   return rows[0] ? mapTicketRow(rows[0]) : null;
+}
+
+async function supabaseResetSessionTickets(sessionId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return;
+  }
+
+  await supabaseRequest(
+    `/tickets?session_id=eq.${encodeURIComponent(sessionId)}&status=eq.confirmed`,
+    {
+      method: "PATCH",
+      headers: {
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        status: "refunded",
+        refunded_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }),
+    }
+  );
 }
 
 async function loadSession(config) {
@@ -1178,6 +1225,15 @@ async function confirmTicketBooking(payload = {}) {
     };
   }
 
+  const hasWaitlistClaim = session.claimedUsers.includes(userId);
+  if (session.sessionStatus === "sold_out" && !hasWaitlistClaim) {
+    return { ok: false, message: "This released ticket is reserved for the notified waitlist user." };
+  }
+
+  if (session.availableSeats <= 0) {
+    return { ok: false, message: "This session is sold out." };
+  }
+
   const ticket = await supabaseCreateTicket({
     user_id: userId,
     session_id: sessionId,
@@ -1195,6 +1251,7 @@ async function confirmTicketBooking(payload = {}) {
     session.bookedSeats.push(seat);
   }
   delete session.heldSeats[seat];
+  session.claimedUsers = session.claimedUsers.filter((claimedUserId) => claimedUserId !== userId);
   setAvailableSeats(session, Math.max(0, session.availableSeats - 1));
   if (session.availableSeats <= 0) {
     setSessionStatus(session, "sold_out");
@@ -1219,7 +1276,15 @@ async function refundTicket(userId, sessionId, seat = null) {
   }
 
   const ticket = await supabaseRefundActiveTicket(userId, sessionId);
+  if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && !ticket) {
+    return { ok: false, message: "No active ticket was found for this user and session." };
+  }
+
   const releasedSeat = ticket?.seat || seat;
+  if (!releasedSeat) {
+    return { ok: false, message: "No seat was found for this ticket." };
+  }
+
   if (releasedSeat) {
     session.bookedSeats = session.bookedSeats.filter((bookedSeat) => bookedSeat !== releasedSeat);
     delete session.heldSeats[releasedSeat];
@@ -1263,7 +1328,6 @@ function claimReleasedTicket(userId, sessionId) {
 
   clearClaimTimer(session);
   session.claimDeadline = null;
-  setAvailableSeats(session, Math.max(0, session.availableSeats - 1));
   session.waitlist = session.waitlist.filter((entry) => entry.userId !== userId);
   session.claimedUsers.push(userId);
   session.currentlyNotifiedUser = null;
@@ -1284,6 +1348,43 @@ function claimReleasedTicket(userId, sessionId) {
   return { ok: true };
 }
 
+// Lets a notified waitlist user pass on the released ticket immediately.
+function declineReleasedTicket(userId, sessionId) {
+  const session = getSession(sessionId);
+
+  if (session.currentlyNotifiedUser !== userId) {
+    return { ok: false, message: "You are not the currently notified waitlist user." };
+  }
+
+  clearClaimTimer(session);
+  session.claimDeadline = null;
+  session.waitlist = session.waitlist.filter((entry) => entry.userId !== userId);
+  session.currentlyNotifiedUser = null;
+  session.notifiedUserId = null;
+
+  emitToUser(userId, "claim_declined", {
+    sessionId,
+    userId,
+    message: "Ticket declined.",
+  });
+  emitToastMessage(userId, {
+    type: "info",
+    message: "Ticket declined.",
+  });
+
+  logEvent(sessionId, `${userId} declined the released ticket.`);
+  updateWaitlistPositions(sessionId);
+
+  const result = notifyNextWaitlistUser(sessionId);
+  if (!result.ok) {
+    setSessionStatus(session, "normal");
+    setAvailableSeats(session, Math.max(1, session.availableSeats));
+    emitSessionUpdate(sessionId);
+  }
+
+  return { ok: true };
+}
+
 // Expires the active claim window and advances to the next waitlist user if one exists.
 function expireClaimWindow(userId, sessionId) {
   const session = getSession(sessionId);
@@ -1297,7 +1398,6 @@ function expireClaimWindow(userId, sessionId) {
   session.waitlist = session.waitlist.filter((entry) => entry.userId !== userId);
   session.currentlyNotifiedUser = null;
   session.notifiedUserId = null;
-  setAvailableSeats(session, Math.max(0, session.availableSeats - 1));
 
   emitToUser(userId, "claim_expired", {
     sessionId,
@@ -1311,7 +1411,12 @@ function expireClaimWindow(userId, sessionId) {
 
   logEvent(sessionId, `${userId}'s claim window expired.`);
   updateWaitlistPositions(sessionId);
-  notifyNextWaitlistUser(sessionId);
+  const result = notifyNextWaitlistUser(sessionId);
+  if (!result.ok) {
+    setSessionStatus(session, "normal");
+    setAvailableSeats(session, Math.max(1, session.availableSeats));
+    emitSessionUpdate(sessionId);
+  }
   return { ok: true };
 }
 
@@ -1350,8 +1455,9 @@ function setSessionHighDemand(sessionId) {
 }
 
 // Resets all in-memory demo state so the queue and waitlist can be replayed for a video demo.
-function resetDemo(sessionId) {
+async function resetDemo(sessionId) {
   const session = getSession(sessionId);
+  await supabaseResetSessionTickets(sessionId);
   clearClaimTimer(session);
   setSessionStatus(session, "normal");
   setAvailableSeats(session, 8);
@@ -1540,6 +1646,18 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("decline_ticket", ({ userId, sessionId } = {}, ack) => {
+    try {
+      const result = declineReleasedTicket(userId, sessionId);
+      if (ack) ack(result);
+      if (!result.ok) socket.emit("error_message", result.message);
+    } catch (error) {
+      const message = error.message || "Unable to decline ticket.";
+      if (ack) ack({ ok: false, message });
+      socket.emit("error_message", message);
+    }
+  });
+
   socket.on("mark_sold_out", ({ sessionId } = {}, ack) => {
     try {
       const result = markSoldOut(sessionId);
@@ -1576,9 +1694,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("reset_demo", ({ sessionId } = {}, ack) => {
+  socket.on("reset_demo", async ({ sessionId } = {}, ack) => {
     try {
-      const result = resetDemo(sessionId);
+      const result = await resetDemo(sessionId);
       if (ack) ack(result);
       emitAdminState();
     } catch (error) {

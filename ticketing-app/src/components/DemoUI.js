@@ -171,61 +171,6 @@ export function HeroBand({ eyebrow, title, subtitle, accent = "#e50914" }) {
   );
 }
 
-export function HeroHeader({ eyebrow, title, subtitle, meta }) {
-  return (
-    <View
-      style={{
-        marginBottom: 16,
-        borderRadius: 28,
-        padding: 18,
-        backgroundColor: "#111116",
-        borderWidth: 1,
-        borderColor: "rgba(255,255,255,0.08)",
-        overflow: "hidden",
-      }}
-    >
-      <View
-        style={{
-          position: "absolute",
-          right: -36,
-          top: -26,
-          width: 150,
-          height: 150,
-          borderRadius: 999,
-          backgroundColor: "rgba(214,40,40,0.16)",
-        }}
-      />
-      <View
-        style={{
-          width: 88,
-          paddingVertical: 7,
-          paddingHorizontal: 10,
-          borderRadius: 999,
-          backgroundColor: "rgba(214,40,40,0.16)",
-        }}
-      >
-        <Text style={{ color: "#ff9f9f", fontSize: 11, fontWeight: "800", letterSpacing: 1.2 }}>
-          {eyebrow}
-        </Text>
-      </View>
-      <Text
-        style={{
-          color: "white",
-          fontSize: 30,
-          lineHeight: 34,
-          fontWeight: "900",
-          marginTop: 14,
-          letterSpacing: -0.5,
-        }}
-      >
-        {title}
-      </Text>
-      <Text style={{ color: "#b4b4bf", marginTop: 8, lineHeight: 22 }}>{subtitle}</Text>
-      {meta ? <Text style={{ color: "#ffb703", marginTop: 10, fontWeight: "700" }}>{meta}</Text> : null}
-    </View>
-  );
-}
-
 export function Card({ title, subtitle, children, style }) {
   return (
     <View

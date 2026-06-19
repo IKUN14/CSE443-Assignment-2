@@ -41,6 +41,21 @@ function normalizeNotifications(items) {
   return Array.from(merged.values()).slice(0, 50);
 }
 
+function ticketToSession(ticket) {
+  if (!ticket) return null;
+  return {
+    ticketId: ticket.id || null,
+    sessionId: ticket.sessionId,
+    movieId: ticket.movieId,
+    movieTitle: ticket.movieTitle,
+    cinema: ticket.cinema,
+    date: ticket.date,
+    showtime: ticket.showtime,
+    seat: ticket.seat,
+    price: ticket.price,
+  };
+}
+
 export function DemoProvider({ children }) {
   const [username, setUsername] = useState("User A");
   const [selectedSession, setSelectedSession] = useState(null);
@@ -60,18 +75,29 @@ export function DemoProvider({ children }) {
   useEffect(() => {
     let cancelled = false;
 
-    async function loadNotifications() {
+    async function loadUserState() {
       setNotifications([]);
+      setSelectedSession(null);
       setNotificationsLoaded(false);
       try {
-        const response = await fetch(`${API_BASE_URL}/api/notifications?userId=${encodeURIComponent(username)}`);
-        const data = await response.json();
-        if (!cancelled && data.ok) {
-          setNotifications(normalizeNotifications(Array.isArray(data.notifications) ? data.notifications : []));
+        const [notificationsResponse, ticketsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/notifications?userId=${encodeURIComponent(username)}`),
+          fetch(`${API_BASE_URL}/api/tickets?userId=${encodeURIComponent(username)}`),
+        ]);
+        const notificationsData = await notificationsResponse.json();
+        const ticketsData = await ticketsResponse.json();
+
+        if (!cancelled && notificationsData.ok) {
+          setNotifications(normalizeNotifications(Array.isArray(notificationsData.notifications) ? notificationsData.notifications : []));
+        }
+        if (!cancelled && ticketsData.ok) {
+          const tickets = Array.isArray(ticketsData.tickets) ? ticketsData.tickets : [];
+          setSelectedSession(ticketToSession(tickets[0]));
         }
       } catch {
         if (!cancelled) {
           setNotifications([]);
+          setSelectedSession(null);
         }
       } finally {
         if (!cancelled) {
@@ -81,7 +107,7 @@ export function DemoProvider({ children }) {
     }
 
     if (username) {
-      loadNotifications();
+      loadUserState();
     }
 
     return () => {
