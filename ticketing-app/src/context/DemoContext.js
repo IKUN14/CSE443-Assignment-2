@@ -7,6 +7,19 @@ const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL || "http://127.0.0.1:3001"
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || SOCKET_URL;
 const NOTIFICATION_DEDUPE_MS = 30000;
 
+function getPayloadStatus(payload) {
+  return payload?.sessionStatus || payload?.status || "normal";
+}
+
+function pickPrimarySession(sessions, preferredSessionId = null) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return null;
+  return (
+    sessions.find((session) => preferredSessionId && session.id === preferredSessionId) ||
+    sessions.find((session) => getPayloadStatus(session) !== "normal") ||
+    sessions[0]
+  );
+}
+
 function buildNotificationKey(userId, kind, title, message, meta = {}) {
   return [
     userId,
@@ -59,7 +72,9 @@ function ticketToSession(ticket) {
 export function DemoProvider({ children }) {
   const [username, setUsername] = useState("User A");
   const [selectedSession, setSelectedSession] = useState(null);
-  const [sessionStatus, setSessionStatus] = useState("normal");
+  const [fallbackSessionStatus, setFallbackSessionStatus] = useState("normal");
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [sessionStatuses, setSessionStatuses] = useState({});
   const [notifications, setNotifications] = useState([]);
   const [notificationsLoaded, setNotificationsLoaded] = useState(false);
   const notificationKeysRef = useRef(new Map());
@@ -71,6 +86,80 @@ export function DemoProvider({ children }) {
       socket.emit("register_user", { userId: username });
     }
   }, [socket, username]);
+
+  const setSessionStatus = useCallback((nextStatus, sessionId = selectedSession?.sessionId || activeSessionId) => {
+    const normalizedStatus = nextStatus || "normal";
+    setFallbackSessionStatus(normalizedStatus);
+
+    if (!sessionId) return;
+
+    setActiveSessionId(sessionId);
+    setSessionStatuses((prev) => ({
+      ...prev,
+      [sessionId]: normalizedStatus,
+    }));
+  }, [activeSessionId, selectedSession?.sessionId]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const applyAdminSnapshot = (payload) => {
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+      if (!sessions.length) return;
+
+      setSessionStatuses((prev) => {
+        const next = { ...prev };
+        sessions.forEach((session) => {
+          if (session.id) {
+            next[session.id] = getPayloadStatus(session);
+          }
+        });
+        return next;
+      });
+
+      const primarySession = selectedSession?.sessionId
+        ? pickPrimarySession(sessions, selectedSession.sessionId)
+        : sessions.find((session) => getPayloadStatus(session) !== "normal") ||
+          sessions.find((session) => activeSessionId && session.id === activeSessionId) ||
+          sessions[0];
+      if (primarySession?.id) {
+        setActiveSessionId(primarySession.id);
+        setFallbackSessionStatus(getPayloadStatus(primarySession));
+      }
+    };
+
+    const onSessionUpdate = (payload) => {
+      if (!payload?.sessionId) return;
+      const nextStatus = getPayloadStatus(payload);
+      setSessionStatuses((prev) => ({
+        ...prev,
+        [payload.sessionId]: nextStatus,
+      }));
+
+      const shouldFocusSession = selectedSession?.sessionId
+        ? payload.sessionId === selectedSession.sessionId
+        : !activeSessionId || activeSessionId === payload.sessionId || nextStatus !== "normal";
+
+      if (shouldFocusSession) {
+        setActiveSessionId(payload.sessionId);
+        setFallbackSessionStatus(nextStatus);
+      }
+    };
+
+    socket.emit("admin_request_state");
+    socket.on("admin_state_update", applyAdminSnapshot);
+    socket.on("session_update", onSessionUpdate);
+
+    fetch(`${API_BASE_URL}/api/admin/state`)
+      .then((response) => response.json())
+      .then(applyAdminSnapshot)
+      .catch(() => {});
+
+    return () => {
+      socket.off("admin_state_update", applyAdminSnapshot);
+      socket.off("session_update", onSessionUpdate);
+    };
+  }, [activeSessionId, selectedSession?.sessionId, socket]);
 
   useEffect(() => {
     let cancelled = false;
@@ -216,6 +305,14 @@ export function DemoProvider({ children }) {
     [notifications]
   );
 
+  const sessionStatus = useMemo(() => {
+    const currentSessionId = selectedSession?.sessionId || activeSessionId;
+    if (currentSessionId && sessionStatuses[currentSessionId]) {
+      return sessionStatuses[currentSessionId];
+    }
+    return fallbackSessionStatus;
+  }, [activeSessionId, fallbackSessionStatus, selectedSession?.sessionId, sessionStatuses]);
+
   const value = useMemo(
     () => ({
       socket,
@@ -239,6 +336,7 @@ export function DemoProvider({ children }) {
       username,
       selectedSession,
       sessionStatus,
+      setSessionStatus,
       notifications,
       unreadCount,
       notificationsLoaded,

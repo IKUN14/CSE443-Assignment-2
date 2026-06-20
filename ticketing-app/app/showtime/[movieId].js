@@ -84,7 +84,7 @@ export default function ShowtimeScreen() {
 
     const onSessionUpdate = (payload) => {
       if (payload.sessionId !== session.sessionId) return;
-      setSessionStatus(payload.sessionStatus || payload.status || "normal");
+      setSessionStatus(payload.sessionStatus || payload.status || "normal", payload.sessionId);
     };
 
     const onError = (message) => {

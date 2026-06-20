@@ -50,7 +50,7 @@ export default function BookingScreen() {
 
     const onSessionUpdate = (payload) => {
       if (payload.sessionId !== activeSession.sessionId) return;
-      setSessionStatus(payload.sessionStatus || payload.status || "normal");
+      setSessionStatus(payload.sessionStatus || payload.status || "normal", payload.sessionId);
       if (Array.isArray(payload.bookedSeats)) setBookedSeats(payload.bookedSeats);
       if (payload.heldSeats && typeof payload.heldSeats === "object") setHeldSeats(payload.heldSeats);
     };

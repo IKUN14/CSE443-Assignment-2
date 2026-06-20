@@ -88,7 +88,7 @@ export default function QueueScreen() {
 
     const onSessionUpdate = (payload) => {
       if (payload.sessionId !== activeSession.sessionId) return;
-      setSessionStatus(payload.sessionStatus || payload.status || "normal");
+      setSessionStatus(payload.sessionStatus || payload.status || "normal", payload.sessionId);
     };
 
     const onError = (message) => pushNotification("error", "Queue error", message);
